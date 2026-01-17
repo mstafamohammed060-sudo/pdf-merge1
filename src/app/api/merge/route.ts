@@ -3,29 +3,8 @@ export const runtime = "nodejs";
 
 import { NextRequest, NextResponse } from "next/server";
 import { PDFDocument } from "pdf-lib";
-import { exec } from "child_process";
-import { promisify } from "util";
-import fs from "fs/promises";
-import path from "path";
-import os from "os";
-
-const execAsync = promisify(exec);
-
-// Check if Ghostscript is available
-async function isGhostscriptAvailable(): Promise<boolean> {
-  try {
-    await execAsync("gs --version");
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 export async function POST(req: NextRequest) {
-  let tempDir: string | null = null;
-  let tempInputPath: string | null = null;
-  let tempOutputPath: string | null = null;
-
   try {
     const formData = await req.formData();
     const files = formData.getAll("files") as File[];
@@ -49,107 +28,64 @@ export async function POST(req: NextRequest) {
       pages.forEach((page) => mergedPdf.addPage(page));
     }
 
-    // Save merged PDF
-    const mergedBytes = await mergedPdf.save();
+    // Apply different compression strategies
+    let mergedBytes: Uint8Array;
     
-    // If no compression requested, return immediately
     if (compressionLevel === 0) {
-      return new NextResponse(Buffer.from(mergedBytes), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/pdf",
-          "Content-Disposition": 'attachment; filename="merged.pdf"',
-          "Content-Length": mergedBytes.length.toString(),
-        },
+      // No compression
+      mergedBytes = await mergedPdf.save();
+    } 
+    else if (compressionLevel === 1) {
+      // Medium compression
+      mergedBytes = await mergedPdf.save({
+        useObjectStreams: true,
+        addDefaultPage: false,
+        objectsPerTick: 50,
+      });
+    } 
+    else {
+      // High compression - Use more aggressive settings
+      mergedBytes = await mergedPdf.save({
+        useObjectStreams: true,
+        addDefaultPage: false,
+        objectsPerTick: 20,
+      });
+      
+      // Try to optimize further by removing metadata
+      const optimizedPdf = await PDFDocument.load(mergedBytes);
+      optimizedPdf.setTitle("Merged PDF");
+      optimizedPdf.setAuthor("PDF Merger");
+      optimizedPdf.setSubject("Merged Documents");
+      optimizedPdf.setKeywords(["merged", "pdf"]);
+      optimizedPdf.setCreationDate(new Date());
+      optimizedPdf.setModificationDate(new Date());
+      
+      mergedBytes = await optimizedPdf.save({
+        useObjectStreams: true,
+        objectsPerTick: 10,
       });
     }
 
-    // Create temp directory for processing
-    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pdf-compress-"));
-    tempInputPath = path.join(tempDir, "input.pdf");
-    tempOutputPath = path.join(tempDir, "output.pdf");
+    const nodeBuffer = Buffer.from(mergedBytes);
 
-    // Save merged PDF to temp file
-    await fs.writeFile(tempInputPath, mergedBytes);
-
-    // Check if Ghostscript is available
-    const gsAvailable = await isGhostscriptAvailable();
-    
-    if (!gsAvailable) {
-      console.warn("Ghostscript not available, using basic compression");
-      // Fallback to pdf-lib compression
-      const saveOptions = compressionLevel === 1 
-        ? { useObjectStreams: true, objectsPerTick: 50 }
-        : { useObjectStreams: true, objectsPerTick: 20 };
-      
-      const compressedBytes = await mergedPdf.save(saveOptions);
-      
-      return new NextResponse(Buffer.from(compressedBytes), {
-        status: 200,
-        headers: {
-          "Content-Type": "application/pdf",
-          "Content-Disposition": 'attachment; filename="merged_compressed.pdf"',
-          "Content-Length": compressedBytes.length.toString(),
-        },
-      });
-    }
-
-    // Use Ghostscript for real compression
-    let gsCommand = "";
-    
-    switch (compressionLevel) {
-      case 1: // Medium compression (ebook quality)
-        gsCommand = `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
-          -dPDFSETTINGS=/ebook \
-          -dNOPAUSE -dQUIET -dBATCH \
-          -sOutputFile="${tempOutputPath}" "${tempInputPath}"`;
-        break;
-      case 2: // High compression (screen quality - smallest)
-        gsCommand = `gs -sDEVICE=pdfwrite -dCompatibilityLevel=1.4 \
-          -dPDFSETTINGS=/screen \
-          -dEmbedAllFonts=true -dSubsetFonts=true -dConvertCMYKImagesToRGB=true \
-          -dColorImageDownsampleType=/Bicubic -dColorImageResolution=150 \
-          -dGrayImageDownsampleType=/Bicubic -dGrayImageResolution=150 \
-          -dMonoImageDownsampleType=/Bicubic -dMonoImageResolution=150 \
-          -dNOPAUSE -dQUIET -dBATCH \
-          -sOutputFile="${tempOutputPath}" "${tempInputPath}"`;
-        break;
-    }
-
-    // Execute Ghostscript command
-    await execAsync(gsCommand);
-
-    // Read compressed file
-    const compressedBuffer = await fs.readFile(tempOutputPath);
-
-    return new NextResponse(compressedBuffer, {
+    return new NextResponse(nodeBuffer, {
       status: 200,
       headers: {
         "Content-Type": "application/pdf",
-        "Content-Disposition": 'attachment; filename="merged_compressed.pdf"',
-        "Content-Length": compressedBuffer.length.toString(),
-        "X-Compression-Method": "ghostscript",
+        "Content-Disposition": `attachment; filename="merged${compressionLevel > 0 ? '_compressed' : ''}.pdf"`,
+        "Content-Length": nodeBuffer.length.toString(),
         "X-Compression-Level": compressionLevel.toString(),
       },
     });
 
   } catch (error) {
-    console.error("PDF compression error:", error);
+    console.error("PDF merge error:", error);
     return NextResponse.json(
       { 
-        error: "Failed to process PDFs", 
+        error: "Failed to merge PDFs", 
         details: error instanceof Error ? error.message : "Unknown error" 
       },
       { status: 500 }
     );
-  } finally {
-    // Cleanup temp files
-    if (tempDir) {
-      try {
-        await fs.rm(tempDir, { recursive: true, force: true });
-      } catch (cleanupError) {
-        console.warn("Cleanup error:", cleanupError);
-      }
-    }
   }
 }

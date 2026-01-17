@@ -1,8 +1,12 @@
 {
   "functions": {
     "app/api/merge/route.ts": {
-      "maxDuration": 30
+      "maxDuration": 30,
+      "memory": 1024
     }
   },
-  "installCommand": "apt-get update && apt-get install -y ghostscript"
+  "installCommand": "apt-get update && apt-get install -y ghostscript && npm install",
+  "outputDirectory": ".next",
+  "framework": "nextjs",
+  "buildCommand": "npm run build"
 }
